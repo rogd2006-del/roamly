@@ -1,0 +1,1932 @@
+"use client";
+
+import React, { useState, useEffect } from "react";
+import dynamic from "next/dynamic";
+import { differenceInDays, parseISO, format } from "date-fns";
+import type { DateRange } from "react-day-picker";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectTrigger,
+  SelectContent,
+  SelectItem,
+  SelectValue,
+} from "@/components/ui/select";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { MultiSelectInterests } from "@/components/ui/multi-select-interests";
+import Link from "next/link";
+
+// react-day-picker touches window/document during measurement — load client-only,
+// matching the pattern already used in app/mapcalendar/page.tsx.
+const Calendar = dynamic(() => import("@/components/ui/calendar").then((mod) => mod.Calendar), {
+  ssr: false,
+  loading: () => <div className="p-6 text-sm text-muted-foreground">Loading calendar…</div>,
+});
+import {
+  Plane,
+  Calendar as CalendarIcon,
+  MapPin,
+  IndianRupee,
+  Hotel,
+  Car,
+  Heart,
+  Lightbulb,
+  Loader2,
+  CheckCircle,
+  AlertCircle,
+  Globe,
+  Clock,
+  Star,
+  Check,
+  X,
+  RotateCcw,
+  Edit3,
+  ArrowRight,
+  Sparkles,
+  Search,
+  LocateFixed,
+  ChevronDown,
+  ChevronUp,
+  ShieldCheck,
+  ShieldAlert,
+  User,
+  Languages,
+  Award
+} from "lucide-react";
+
+interface TravelDetails {
+  destinations: string[];
+  start_date: string;
+  end_date: string;
+  budget: string;
+  travel_style: string;
+  interests: string[];
+  accommodation: string;
+  transportation: string;
+  special_requests: string;
+}
+
+interface ItineraryDay {
+  day: string;
+  city: string;
+  morning: string;
+  afternoon: string;
+  evening: string;
+  accommodation: string;
+  meals: string;
+  estimated_cost: string;
+  guide?: {
+    guideId: string;
+    name: string;
+    isDemo: boolean;
+    isBookable: boolean;
+    hourlyRate: number;
+    cost: number;
+  } | null;
+  weather?: {
+    description: string;
+    emoji: string;
+    minC: number;
+    maxC: number;
+  } | null;
+}
+
+interface TravelPlan {
+  itinerary: ItineraryDay[];
+  total_estimated_cost: string;
+  travel_tips: string[];
+  packing_list: string[];
+  emergency_contacts: {
+    local_emergency: string;
+    embassy: string;
+    hotel: string;
+  };
+}
+
+interface ApiResponse {
+  plan: TravelPlan;
+  summary: string;
+}
+
+// --- Grounded Agent Router response shape (POST /api/itinerary/plan) ---
+// See docs/Roamly_Grounded_Agent_Router_Fixed_Plan.md for the full contract.
+interface AgentGuide {
+  guideId: string;
+  name: string;
+  isDemo: boolean;
+  isBookable: boolean;
+  hourlyRate: number;
+  cost: number;
+}
+
+interface AgentActivity {
+  slot: string;
+  placeId: string;
+  name: string;
+  startTime: string;
+  endTime: string;
+  estimatedCost: number;
+}
+
+interface AgentDay {
+  day: string;
+  date: string;
+  locationId: string;
+  city: string;
+  activities: AgentActivity[];
+  transit: {
+    fromLocationId: string;
+    toLocationId: string;
+    distanceMeters: number | null;
+    durationSeconds: number | null;
+    requestedMode: string;
+    actualModes: string[];
+    preferenceSatisfied: boolean;
+  } | null;
+  guide: AgentGuide | null;
+  weather:
+    | { available: true; description: string; temperatureMaxC: number; temperatureMinC: number; precipitationProbabilityMax: number }
+    | { available: false; reason: string };
+  accommodationCost: number;
+  foodCost: number;
+  transportCost: number;
+  activitiesCost: number;
+  guideCost: number;
+  dayEstimatedCost: number;
+}
+
+interface ItineraryPlanSuccess {
+  success: true;
+  tripId: number | null;
+  tripSummary: {
+    totalBudget: number;
+    estimatedTotalCost: number;
+    remainingBudget: number;
+    travelerCount: number;
+    durationDays: number;
+    budgetPerPersonPerDay: number;
+  };
+  budgetBreakdown: Record<string, number>;
+  destinations: Array<{ locationId: string; name: string; city: string }>;
+  days: AgentDay[];
+  sources: Record<string, string | null>;
+  routerTrace: {
+    agentsExecuted: string[];
+    fallbackUsed: boolean;
+    validationStatus: "PASSED" | "FAILED";
+    reOptimizations: number;
+  };
+  warnings?: Array<{ code: string; details: string }>;
+}
+
+interface ItineraryPlanFailure {
+  success: false;
+  error: { code: string; message: string; details?: unknown };
+  routerTrace: {
+    agentsExecuted: string[];
+    fallbackUsed: boolean;
+    validationStatus: "PASSED" | "FAILED";
+    reOptimizations: number;
+  };
+}
+
+type ItineraryPlanResponse = ItineraryPlanSuccess | ItineraryPlanFailure;
+
+function deriveBudgetCategory(amountStr: string): {
+  category: "Budget" | "Mid-range" | "Premium" | "Luxury";
+  description: string;
+} {
+  const numeric = Math.max(0, parseInt(amountStr.replace(/[^0-9]/g, ""), 10) || 0);
+  const formatted = `₹${numeric.toLocaleString("en-IN")}`;
+  if (numeric < 50000) {
+    return {
+      category: "Budget",
+      description: `Based on your ${formatted} total trip budget`,
+    };
+  }
+  if (numeric < 100000) {
+    return {
+      category: "Mid-range",
+      description: `Based on your ${formatted} total trip budget`,
+    };
+  }
+  if (numeric < 200000) {
+    return {
+      category: "Premium",
+      description: `Based on your ${formatted} total trip budget`,
+    };
+  }
+  return {
+    category: "Luxury",
+    description: `Based on your ${formatted} total trip budget`,
+  };
+}
+
+const accommodationOptions = ["Hostel", "Hotel", "Airbnb", "Resort"];
+const transportOptions = ["Public Transport", "Car Rental", "Train", "Flight"];
+const travelStyleOptions = ["Cultural", "Adventure", "Relaxation", "Food & Wine", "Historical", "Nature", "Urban", "Rural"];
+
+const travelerCountOptions = [1, 2, 3, 4, 5];
+
+const guidePreferenceOptions: Array<{ value: "NO_GUIDE" | "NEED_GUIDE" | "CHOOSE_GUIDE"; label: string }> = [
+  { value: "NO_GUIDE", label: "No Guide" },
+  { value: "NEED_GUIDE", label: "Need a Guide" },
+  { value: "CHOOSE_GUIDE", label: "Choose a Guide" },
+];
+
+/**
+ * Maps the free-text transportation dropdown value to the grounded agent
+ * router's supported transit modes. "Flight" has no ground-route equivalent
+ * (routeAgent only computes routes between consecutive resolved stops), so
+ * it falls back to CAB for local transit legs.
+ */
+function mapTransportationPreference(uiValue: string): "TRAIN" | "PUBLIC_TRANSIT" | "CAB" | "WALKING" {
+  switch (uiValue) {
+    case "Train":
+      return "TRAIN";
+    case "Public Transport":
+      return "PUBLIC_TRANSIT";
+    case "Car Rental":
+      return "CAB";
+    case "Flight":
+      return "CAB";
+    default:
+      return "CAB";
+  }
+}
+
+const WEATHER_CODE_EMOJI: Record<string, string> = {
+  Clear: "☀️",
+  Cloud: "☁️",
+  Rain: "🌧️",
+  Drizzle: "🌦️",
+  Snow: "❄️",
+  Fog: "🌫️",
+  Thunder: "⛈️",
+};
+
+function weatherEmoji(description: string): string {
+  const match = Object.keys(WEATHER_CODE_EMOJI).find((k) => description.includes(k));
+  return match ? WEATHER_CODE_EMOJI[match] : "🌤️";
+}
+
+/**
+ * Adapts the grounded agent router's response (AgentDay[]) into the legacy
+ * TravelPlan shape the existing itinerary UI renders, so the detailed card
+ * layout below keeps working unchanged. The raw agent response is kept
+ * separately (see `agentResult` state) for the grounding diagnostic panel.
+ */
+function adaptAgentResponseToTravelPlan(result: ItineraryPlanSuccess): TravelPlan {
+  const itinerary: ItineraryDay[] = result.days.map((day) => {
+    const bySlot = (slot: string) => {
+      const activity = day.activities.find((a) => a.slot === slot);
+      if (!activity) return "Free time";
+      return `${activity.name} (${activity.startTime}–${activity.endTime})`;
+    };
+
+    const weatherNote = day.weather.available
+      ? `${weatherEmoji(day.weather.description)} ${day.weather.description}, ${Math.round(day.weather.temperatureMinC)}–${Math.round(day.weather.temperatureMaxC)}°C`
+      : "Weather forecast unavailable for this date";
+
+    const guideNote = day.guide
+      ? `${day.guide.name}${day.guide.isDemo ? " ⚠️ DEMO DATA — NOT BOOKABLE" : ""}`
+      : "No guide assigned";
+
+    return {
+      day: day.day,
+      city: day.city,
+      morning: bySlot("morning"),
+      afternoon: bySlot("afternoon"),
+      evening: bySlot("evening"),
+      accommodation: `Hotel / Stay near ${day.city}`,
+      meals: `Local culinary specialties in ${day.city}`,
+      estimated_cost: `₹${day.dayEstimatedCost.toLocaleString("en-IN")}`,
+      guide: day.guide || null,
+      weather: day.weather.available
+        ? {
+            description: day.weather.description,
+            emoji: weatherEmoji(day.weather.description),
+            minC: Math.round(day.weather.temperatureMinC),
+            maxC: Math.round(day.weather.temperatureMaxC),
+          }
+        : null,
+    };
+  });
+
+  const travel_tips = [
+    ...result.days
+      .filter((d) => d.transit && d.transit.preferenceSatisfied === false)
+      .map((d) => `Travel from ${d.transit!.fromLocationId === d.locationId ? d.city : "the previous stop"} to ${d.city} may not fully match your preferred transport mode.`),
+    ...(result.warnings || []).map((w) => w.details),
+  ];
+
+  return {
+    itinerary,
+    total_estimated_cost: `₹${result.tripSummary.estimatedTotalCost.toLocaleString("en-IN")}`,
+    travel_tips: travel_tips.length > 0 ? travel_tips : ["All grounded data checks passed — have a great trip!"],
+    packing_list: ["Comfortable walking shoes", "Weather-appropriate clothing", "Phone charger & power bank", "Government ID / passport copies"],
+    emergency_contacts: {
+      local_emergency: "112",
+      embassy: "Contact your respective embassy/consulate",
+      hotel: "Hotel/accommodation front desk",
+    },
+  };
+}
+
+export interface DestinationItem {
+  locationId?: string;
+  googlePlaceId?: string;
+  name: string;
+  formattedAddress?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
+export default function LLMPage() {
+  const [loading, setLoading] = useState(false);
+  const [plan, setPlan] = useState<TravelPlan | null>(null);
+  const [summary, setSummary] = useState("");
+  const [error, setError] = useState("");
+  const [jobStatus, setJobStatus] = useState<'idle' | 'queued' | 'processing' | 'completed' | 'failed'>('idle');
+  const [decisionStatus, setDecisionStatus] = useState<'pending' | 'accepted' | 'rejected'>('pending');
+
+  const [citiesText, setCitiesText] = useState("");
+  const [selectedDestinations, setSelectedDestinations] = useState<DestinationItem[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [suggestions, setSuggestions] = useState<Array<{
+    placeId: string;
+    name: string;
+    mainText: string;
+    secondaryText?: string;
+  }>>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [locatingCurrent, setLocatingCurrent] = useState(false);
+  const [locationMessage, setLocationMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+  const [customBudget, setCustomBudget] = useState("60000");
+  const [accommodation, setAccommodation] = useState("Hotel");
+  const [transportation, setTransportation] = useState("Train");
+  const [travelInterests, setTravelInterests] = useState<string[]>([]);
+  const [specialRequests, setSpecialRequests] = useState("");
+  const [travelerCount, setTravelerCount] = useState(2);
+  const [guidePreference, setGuidePreference] = useState<"NO_GUIDE" | "NEED_GUIDE" | "CHOOSE_GUIDE">("NO_GUIDE");
+  const [agentResult, setAgentResult] = useState<ItineraryPlanSuccess | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+
+  // Guide selection state (for CHOOSE_GUIDE mode)
+  interface AvailableGuide {
+    id: string;
+    userId: string;
+    name: string;
+    profilePhoto: string | null;
+    bio: string | null;
+    rating: number;
+    experienceYears: number;
+    hourlyRate: number;
+    languages: string[];
+    expertise: string[];
+    verificationStatus: string;
+    availabilityStatus: string;
+    isCurrentlyAtLocation: boolean;
+    currentLocation: { id: string; name: string } | null;
+    coveredLocations: { id: string; name: string }[];
+  }
+  const [availableGuides, setAvailableGuides] = useState<AvailableGuide[]>([]);
+  const [selectedGuide, setSelectedGuide] = useState<AvailableGuide | null>(null);
+  const [loadingGuides, setLoadingGuides] = useState(false);
+  const [guideSearchCity, setGuideSearchCity] = useState<string>("");
+
+  const derivedBudget = deriveBudgetCategory(customBudget);
+  const searchTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  // Derived range object for the Calendar; startDate/endDate ("yyyy-MM-dd"
+  // strings) stay the single source of truth since the rest of the page
+  // (payload building, min= constraints, etc.) already reads them directly.
+  const dateRange: DateRange | undefined = startDate
+    ? { from: parseISO(startDate), to: endDate ? parseISO(endDate) : undefined }
+    : undefined;
+
+  const handleDateRangeSelect = (range: DateRange | undefined) => {
+    setStartDate(range?.from ? format(range.from, "yyyy-MM-dd") : "");
+    setEndDate(range?.to ? format(range.to, "yyyy-MM-dd") : "");
+    if (range?.from && range?.to) setIsDatePickerOpen(false);
+  };
+
+  const addDestination = (item: DestinationItem) => {
+    const updated = [...selectedDestinations, item];
+    setSelectedDestinations(updated);
+    setCitiesText(updated.map((d) => d.name).join(", "));
+    setSearchQuery("");
+    setShowSuggestions(false);
+  };
+
+  const removeDestination = (index: number) => {
+    const updated = selectedDestinations.filter((_, idx) => idx !== index);
+    setSelectedDestinations(updated);
+    setCitiesText(updated.map((d) => d.name).join(", "));
+  };
+
+  const handleSearchInputChange = (val: string) => {
+    setSearchQuery(val);
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    if (!val.trim()) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+    searchTimeoutRef.current = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const res = await fetch(`/api/locations/search?q=${encodeURIComponent(val.trim())}`);
+        const data = await res.json();
+        if (data.suggestions && Array.isArray(data.suggestions)) {
+          setSuggestions(data.suggestions);
+          setShowSuggestions(true);
+        }
+      } catch (err) {
+        console.error("Search failed:", err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 250);
+  };
+
+  const handleSelectSuggestion = async (sug: { placeId: string; name: string; mainText: string; secondaryText?: string }) => {
+    try {
+      setIsSearching(true);
+      const res = await fetch("/api/locations/geocode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ placeId: sug.placeId, name: sug.mainText || sug.name }),
+      });
+      const data = await res.json();
+      if (data.location) {
+        addDestination({
+          locationId: data.location.id,
+          googlePlaceId: data.location.googlePlaceId || sug.placeId,
+          name: data.location.name,
+          formattedAddress: data.location.address?.formatted || sug.secondaryText,
+          latitude: data.location.coordinates?.lat,
+          longitude: data.location.coordinates?.lng,
+        });
+      } else {
+        addDestination({
+          googlePlaceId: sug.placeId,
+          name: sug.mainText || sug.name,
+          formattedAddress: sug.secondaryText,
+        });
+      }
+    } catch (e) {
+      addDestination({
+        googlePlaceId: sug.placeId,
+        name: sug.mainText || sug.name,
+      });
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleSearchInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && searchQuery.trim()) {
+      e.preventDefault();
+      if (suggestions.length > 0) {
+        handleSelectSuggestion(suggestions[0]);
+      } else {
+        fetch("/api/locations/geocode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address: searchQuery.trim() }),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (data.location) {
+              addDestination({
+                locationId: data.location.id,
+                googlePlaceId: data.location.googlePlaceId,
+                name: data.location.name,
+                latitude: data.location.coordinates?.lat,
+                longitude: data.location.coordinates?.lng,
+                formattedAddress: data.location.address?.formatted,
+              });
+            } else {
+              addDestination({ name: searchQuery.trim() });
+            }
+          })
+          .catch(() => {
+            addDestination({ name: searchQuery.trim() });
+          });
+      }
+    }
+  };
+
+  const handleUseCurrentLocation = () => {
+    setLocatingCurrent(true);
+    setLocationMessage(null);
+
+    const fallbackDeviceLocation = async () => {
+      try {
+        const res = await fetch("/api/location/current");
+        const data = await res.json();
+        if (data.location) {
+          addDestination({
+            locationId: data.location.id,
+            googlePlaceId: data.location.googlePlaceId,
+            name: data.location.name || "Current Location",
+            latitude: data.location.coordinates?.lat,
+            longitude: data.location.coordinates?.lng,
+            formattedAddress: data.location.address?.formatted,
+          });
+          setLocationMessage({
+            type: "info",
+            text: `📍 Device location: ${data.location.name} (${data.deviceLocation?.accuracyMeters ? Math.round(data.deviceLocation.accuracyMeters / 1000) + 'km radius' : 'Network estimate'})`,
+          });
+        } else {
+          setLocationMessage({
+            type: "error",
+            text: "Unable to detect device location. You can enter destination manually below.",
+          });
+        }
+      } catch (err: any) {
+        setLocationMessage({
+          type: "error",
+          text: "Unable to detect device location. You can enter destination manually below.",
+        });
+      } finally {
+        setLocatingCurrent(false);
+      }
+    };
+
+    if (typeof window !== "undefined" && "geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          try {
+            const { latitude, longitude } = position.coords;
+            const res = await fetch(`/api/locations/reverse-geocode?lat=${latitude}&lng=${longitude}`);
+            const data = await res.json();
+            if (data.location) {
+              addDestination({
+                locationId: data.location.id,
+                googlePlaceId: data.location.googlePlaceId,
+                name: data.location.name,
+                latitude: data.location.coordinates?.lat,
+                longitude: data.location.coordinates?.lng,
+                formattedAddress: data.location.address?.formatted,
+              });
+              setLocationMessage({
+                type: "success",
+                text: `📍 Current location found: ${data.location.name} (${data.location.address?.city || ""}, ${data.location.address?.country || ""})`,
+              });
+            } else {
+              await fallbackDeviceLocation();
+            }
+          } catch (e) {
+            await fallbackDeviceLocation();
+          } finally {
+            setLocatingCurrent(false);
+          }
+        },
+        async (error) => {
+          if (error.code === error.PERMISSION_DENIED) {
+            setLocationMessage({
+              type: "info",
+              text: "Location permission was denied. You can search or type your destination manually below.",
+            });
+            setLocatingCurrent(false);
+          } else {
+            await fallbackDeviceLocation();
+          }
+        },
+        { timeout: 7000, enableHighAccuracy: true }
+      );
+    } else {
+      fallbackDeviceLocation();
+    }
+  };
+
+  // Fetch available guides for a destination city
+  const fetchGuidesForDestinations = async (targetCity?: string) => {
+    const destNames = selectedDestinations.length > 0
+      ? selectedDestinations.map((d) => d.name)
+      : citiesText.split(",").map((s) => s.trim()).filter(Boolean);
+
+    const city = targetCity || (destNames.length > 0 ? destNames[0] : guideSearchCity);
+    if (!city) {
+      setAvailableGuides([]);
+      return;
+    }
+
+    setLoadingGuides(true);
+    setGuideSearchCity(city);
+
+    try {
+      const res = await fetch(`/api/guides?city=${encodeURIComponent(city)}`);
+      if (res.ok) {
+        const text = await res.text();
+        if (text) {
+          const data = JSON.parse(text);
+          if (data.guides && Array.isArray(data.guides)) {
+            setAvailableGuides(data.guides);
+          } else {
+            setAvailableGuides([]);
+          }
+        }
+      } else {
+        setAvailableGuides([]);
+      }
+    } catch (err) {
+      console.error("Failed to fetch guides:", err);
+      setAvailableGuides([]);
+    } finally {
+      setLoadingGuides(false);
+    }
+  };
+
+  // Automatically fetch guides whenever destination or guide preference changes
+  useEffect(() => {
+    if (guidePreference === "CHOOSE_GUIDE") {
+      fetchGuidesForDestinations();
+    }
+  }, [selectedDestinations, citiesText, guidePreference]);
+
+  const generatePlan = async () => {
+    setLoading(true);
+    setError("");
+    setPlan(null);
+    setSummary("");
+    setAgentResult(null);
+    setDecisionStatus("pending");
+
+    try {
+      const destinations = selectedDestinations.length > 0
+        ? selectedDestinations.map((d) => d.name)
+        : citiesText
+            .split(",")
+            .map((city) => city.trim())
+            .filter(Boolean);
+
+      if (destinations.length === 0) {
+        throw new Error("Please enter or select at least one destination");
+      }
+
+      if (!startDate || !endDate) {
+        throw new Error("Please select both start date and end date");
+      }
+
+      const days = differenceInDays(parseISO(endDate), parseISO(startDate)) + 1;
+      if (days <= 0) {
+        throw new Error("End date must be after start date");
+      }
+
+      const numericBudget = Math.max(0, parseInt(customBudget.replace(/[^0-9]/g, ""), 10) || 0);
+
+      const payload = {
+        destinations,
+        startDate,
+        endDate,
+        travelerCount,
+        totalBudget: numericBudget,
+        accommodationPreference: accommodation,
+        transportationPreference: mapTransportationPreference(transportation),
+        interests: travelInterests,
+        travelStyle: travelInterests[0] || "Cultural",
+        pace: "MODERATE" as const,
+        guidePreference,
+        selectedGuideId: selectedGuide?.id || null,
+      };
+
+      // Always use direct API but simulate queue experience
+      console.log('🚀 Starting travel plan generation...');
+      setJobStatus('queued');
+      console.log('📋 Job queued - waiting in line...');
+
+      // Simulate "queued" status for 1 second
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      setJobStatus('processing');
+      console.log('⚙️  Job processing - generating your travel plan (grounded agent router)...');
+
+      // Make the actual API call to the grounded agent router
+      const res = await fetch("/api/itinerary/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.status === 401) {
+        throw new Error("Please sign in to generate a trip plan — itineraries are saved to your account.");
+      }
+
+      const rawText = await res.text();
+      let data: ItineraryPlanResponse;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        throw new Error(`Server returned a non-JSON response (HTTP ${res.status}). Please try again.`);
+      }
+
+      if (!data.success) {
+        throw new Error(data.error?.message || "Itinerary generation failed validation");
+      }
+
+      console.log('✅ Grounded itinerary received successfully!', data.routerTrace);
+      console.log('🎉 Travel plan completed!');
+
+      setAgentResult(data);
+      setPlan(adaptAgentResponseToTravelPlan(data));
+      setSummary(
+        `Grounded ${data.tripSummary.durationDays}-day trip to ${data.destinations.map((d) => d.name).join(", ")} for ${data.tripSummary.travelerCount} traveler(s). Validation: ${data.routerTrace.validationStatus}.`
+      );
+      setDecisionStatus("pending");
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to generate travel plan";
+      setError(errorMessage);
+      setJobStatus('failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAcceptPlan = () => {
+    const numericBudget = Math.max(0, parseInt(customBudget.replace(/[^0-9]/g, ""), 10) || 0);
+    const resolvedDests = selectedDestinations.length > 0
+      ? selectedDestinations.map((d) => d.name)
+      : citiesText.split(",").map((s) => s.trim()).filter(Boolean);
+
+    const acceptedData = {
+      plan,
+      summary,
+      tripId: agentResult?.tripId ?? null,
+      destinations: resolvedDests,
+      destinationDetails: selectedDestinations,
+      startDate,
+      endDate,
+      totalBudget: numericBudget,
+      budget: `₹${numericBudget.toLocaleString("en-IN")}`,
+      budgetCategory: derivedBudget.category,
+      accommodation,
+      transportation,
+      travelerCount,
+      guidePreference,
+      selectedGuide: selectedGuide ? { id: selectedGuide.id, name: selectedGuide.name } : null,
+      interests: travelInterests,
+      acceptedAt: new Date().toISOString(),
+    };
+    try {
+      localStorage.setItem("roamly_accepted_plan", JSON.stringify(acceptedData));
+    } catch (e) {
+      console.error("Failed to save accepted plan to localStorage", e);
+    }
+    setDecisionStatus("accepted");
+  };
+
+  const handleRejectPlan = () => {
+    setDecisionStatus("rejected");
+  };
+
+  const handleRegenerate = () => {
+    setDecisionStatus("pending");
+    generatePlan();
+  };
+
+  const handleEditChanges = () => {
+    setDecisionStatus("pending");
+    const formElement = document.getElementById("travel-form-card");
+    if (formElement) {
+      formElement.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="container mx-auto px-4 py-8 max-w-4xl">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            AI Travel Planner
+          </h1>
+          <p className="text-gray-600">
+            Generate your perfect travel itinerary with AI assistance
+          </p>
+        </div>
+
+        {/* Form */}
+        <Card id="travel-form-card" className="mb-8 border-[#e5e7db] shadow-sm">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Plane className="h-6 w-6" />
+              Travel Details
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {/* Google-Backed Destinations & Current Location */}
+            <div className="relative">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                <label className="text-sm font-semibold text-gray-800 flex items-center gap-1.5">
+                  <MapPin className="w-4 h-4 text-[#485C11]" />
+                  Destinations
+                </label>
+                <button
+                  type="button"
+                  onClick={handleUseCurrentLocation}
+                  disabled={locatingCurrent}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#485C11] hover:text-[#364A0E] bg-[#DFECC6]/50 hover:bg-[#DFECC6]/80 px-2.5 py-1 rounded-full transition-colors cursor-pointer border border-[#8E9C78]/30 shadow-2xs"
+                >
+                  {locatingCurrent ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Locating device...
+                    </>
+                  ) : (
+                    <>
+                      <LocateFixed className="w-3.5 h-3.5" />
+                      Use My Current Location
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Status or notification message for location detection */}
+              {locationMessage && (
+                <div
+                  className={`mb-2.5 text-xs px-3 py-1.5 rounded-lg flex items-center justify-between ${
+                    locationMessage.type === "success"
+                      ? "bg-green-50 text-green-800 border border-green-200"
+                      : locationMessage.type === "error"
+                      ? "bg-red-50 text-red-800 border border-red-200"
+                      : "bg-amber-50 text-amber-900 border border-amber-200"
+                  }`}
+                >
+                  <span>{locationMessage.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setLocationMessage(null)}
+                    className="ml-2 text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Selected Destination Chips */}
+              {selectedDestinations.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2.5">
+                  {selectedDestinations.map((dest, idx) => (
+                    <span
+                      key={dest.locationId || dest.googlePlaceId || `${dest.name}-${idx}`}
+                      className="inline-flex items-center gap-1.5 bg-[#F4F6EE] border border-[#d6dacb] text-[#2f3d0c] text-xs font-medium px-3 py-1 rounded-full shadow-2xs"
+                    >
+                      <MapPin className="w-3 h-3 text-[#485C11]" />
+                      <span>{dest.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeDestination(idx)}
+                        className="text-gray-400 hover:text-red-600 transition-colors ml-0.5 cursor-pointer"
+                        title="Remove destination"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Destination Search Input with Google Places Autocomplete */}
+              <div className="relative">
+                <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <Input
+                  value={searchQuery}
+                  onChange={(e) => handleSearchInputChange(e.target.value)}
+                  onKeyDown={handleSearchInputKeyDown}
+                  onFocus={() => {
+                    if (suggestions.length > 0) setShowSuggestions(true);
+                  }}
+                  placeholder={
+                    selectedDestinations.length > 0
+                      ? "Search to add another stop (e.g. Agra, Jaipur)..."
+                      : "Search destination or city (e.g. Delhi, Gateway of India)..."
+                  }
+                  className="pl-9 pr-8 bg-white"
+                />
+                {isSearching && (
+                  <Loader2 className="w-4 h-4 text-gray-400 animate-spin absolute right-3 top-1/2 -translate-y-1/2" />
+                )}
+              </div>
+
+              {/* Google Places Suggestions Dropdown */}
+              {showSuggestions && suggestions.length > 0 && (
+                <div className="absolute z-20 w-full mt-1 bg-white border border-[#e5e7db] rounded-xl shadow-lg max-h-60 overflow-y-auto">
+                  {suggestions.every((s) => s.placeId?.startsWith("custom_")) ? (
+                    <div className="px-3 py-1.5 text-[11px] font-semibold text-amber-700 uppercase tracking-wider border-b border-gray-100 bg-amber-50">
+                      No Google Places match — free-text entry only (configure GOOGLE_MAPS_SERVER_API_KEY for real search)
+                    </div>
+                  ) : (
+                    <div className="px-3 py-1.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 bg-[#FAFBF8]">
+                      Google Places Suggestions
+                    </div>
+                  )}
+                  {suggestions.map((sug) => (
+                    <button
+                      key={sug.placeId}
+                      type="button"
+                      onClick={() => handleSelectSuggestion(sug)}
+                      className="w-full text-left px-3.5 py-2 hover:bg-[#F4F6EE] transition-colors flex items-start gap-2.5 cursor-pointer border-b border-gray-50 last:border-0"
+                    >
+                      <MapPin className="w-4 h-4 text-[#485C11] shrink-0 mt-0.5" />
+                      <div>
+                        <div className="text-xs font-semibold text-gray-900">
+                          {sug.mainText || sug.name}
+                        </div>
+                        {sug.secondaryText && (
+                          <div className="text-[11px] text-gray-500">
+                            {sug.secondaryText}
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <p className="text-xs text-gray-500 mt-1.5 flex items-center justify-between">
+                <span>Select from Google suggestions or press Enter to add. Multi-city stops supported.</span>
+                {selectedDestinations.length > 1 && (
+                  <span className="text-[#485C11] font-semibold">
+                    {selectedDestinations.length} stops planned
+                  </span>
+                )}
+              </p>
+            </div>
+
+            {/* Trip Dates */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Trip Dates
+              </label>
+              <Popover open={isDatePickerOpen} onOpenChange={setIsDatePickerOpen}>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="w-full flex items-center justify-between gap-2 rounded-md border border-input bg-white px-3 py-2 text-sm shadow-sm transition-colors hover:border-[#8E9C78] focus:outline-none focus:ring-2 focus:ring-[#485C11]/20 focus:border-[#485C11]"
+                  >
+                    <span className="flex items-center gap-2 text-left">
+                      <CalendarIcon className="size-4 text-[#485C11] shrink-0" />
+                      {startDate ? (
+                        <span className="text-gray-900">
+                          {format(parseISO(startDate), "MMM d, yyyy")}
+                          {endDate ? ` – ${format(parseISO(endDate), "MMM d, yyyy")}` : " – Select end date"}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">Select trip dates</span>
+                      )}
+                    </span>
+                    {startDate && endDate && (
+                      <span className="text-xs font-semibold text-[#485C11] bg-[#DFECC6]/50 px-2 py-0.5 rounded-full shrink-0">
+                        {differenceInDays(parseISO(endDate), parseISO(startDate)) + 1} days
+                      </span>
+                    )}
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar
+                    mode="range"
+                    numberOfMonths={2}
+                    defaultMonth={dateRange?.from}
+                    selected={dateRange}
+                    onSelect={handleDateRangeSelect}
+                    disabled={{ before: new Date() }}
+                    className="rounded-lg"
+                  />
+                </PopoverContent>
+              </Popover>
+              <p className="text-xs text-gray-500 mt-1.5">
+                Pick a start and end date — both months are shown so you can select the full range at once.
+              </p>
+            </div>
+
+            {/* Total Trip Budget Section (Single User-Controlled Budget Input) */}
+            <div className="bg-[#FAFBF8] border border-[#e5e7db] p-4 rounded-2xl space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <label htmlFor="total-trip-budget" className="text-sm font-semibold text-gray-800 flex items-center gap-1.5">
+                  <IndianRupee className="w-4 h-4 text-[#485C11]" />
+                  Enter Total Trip Budget (INR)
+                </label>
+                <span className="text-xs text-[#6b7280]">
+                  Target constraint: {customBudget ? `₹${(parseInt(customBudget.replace(/[^0-9]/g, ""), 10) || 0).toLocaleString("en-IN")}` : "₹0"}
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                <div className="relative flex-1">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500 font-bold text-sm">₹</span>
+                  <Input
+                    id="total-trip-budget"
+                    type="number"
+                    min="0"
+                    step="1000"
+                    value={customBudget}
+                    onChange={(e) => setCustomBudget(e.target.value)}
+                    placeholder="e.g. 60000"
+                    className="pl-8 text-sm font-semibold bg-white"
+                  />
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { label: "₹25K", val: "25000" },
+                    { label: "₹50K", val: "50000" },
+                    { label: "₹75K", val: "75000" },
+                    { label: "₹1 Lakh", val: "100000" },
+                    { label: "₹2 Lakh+", val: "200000" },
+                  ].map((preset) => (
+                    <button
+                      key={preset.val}
+                      type="button"
+                      onClick={() => setCustomBudget(preset.val)}
+                      className={`text-xs px-2.5 py-1.5 rounded-full border transition-all cursor-pointer ${
+                        customBudget === preset.val
+                          ? "bg-[#485C11] text-white border-[#485C11]"
+                          : "bg-white border-[#d6dacb] text-gray-700 hover:border-[#485C11]/50"
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Derived Budget Category Display (Read-Only Dynamic Label) */}
+              <div className="pt-2.5 border-t border-[#e5e7db]/70 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 bg-[#F4F6EE] px-3.5 py-2.5 rounded-xl">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-gray-600">Budget Category:</span>
+                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#485C11] text-white shadow-xs">
+                    {derivedBudget.category}
+                  </span>
+                </div>
+                <span className="text-xs text-[#556341] font-medium">
+                  {derivedBudget.description}
+                </span>
+              </div>
+            </div>
+
+            {/* Accommodation and Transportation (Separate User Inputs) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Accommodation
+                </label>
+                <Select value={accommodation} onValueChange={setAccommodation}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {accommodationOptions.map((option) => (
+                      <SelectItem key={option} value={option}>
+                        {option}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Transportation
+                </label>
+                <Select value={transportation} onValueChange={setTransportation}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {transportOptions.map((option) => (
+                      <SelectItem key={option} value={option}>
+                        {option}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {/* Traveler Count & Guide Preference */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Traveler Count
+                </label>
+                <div className="flex gap-2 flex-wrap">
+                  {travelerCountOptions.map((count) => (
+                    <Button
+                      key={count}
+                      type="button"
+                      size="sm"
+                      variant={travelerCount === count ? "default" : "outline"}
+                      onClick={() => setTravelerCount(count)}
+                    >
+                      {count}
+                      {count === 5 ? "+" : ""}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Guide Preference
+                </label>
+                <div className="flex gap-2 flex-wrap">
+                  {guidePreferenceOptions.map((option) => (
+                    <Button
+                      key={option.value}
+                      type="button"
+                      size="sm"
+                      variant={guidePreference === option.value ? "default" : "outline"}
+                      onClick={() => {
+                        setGuidePreference(option.value);
+                        if (option.value === "CHOOSE_GUIDE") {
+                          fetchGuidesForDestinations();
+                        } else {
+                          setSelectedGuide(null);
+                          setAvailableGuides([]);
+                        }
+                      }}
+                    >
+                      {option.label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* ─── Auto-matching Guide Banner (visible when NEED_GUIDE is selected) ─── */}
+            {guidePreference === "NEED_GUIDE" && (
+              <div className="mt-4 rounded-2xl border border-[#DFECC6] bg-gradient-to-r from-[#DFECC6]/40 via-[#f4f7ee] to-white p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-[#485C11]/15 flex items-center justify-center shrink-0">
+                    <CheckCircle className="w-5 h-5 text-[#485C11]" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-[#1a1a1a]">Auto-Assigning Top-Rated Local Guide</p>
+                    <p className="text-[11px] text-[#6b7280]">
+                      Roamly will match and assign a verified licensed guide for your destination.
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setGuidePreference("CHOOSE_GUIDE");
+                    fetchGuidesForDestinations();
+                  }}
+                  className="text-xs shrink-0 bg-white hover:bg-[#DFECC6]/30 border-[#8E9C78]/50"
+                >
+                  <User className="w-3.5 h-3.5 mr-1 text-[#485C11]" />
+                  Browse & Pick Specific Guide
+                </Button>
+              </div>
+            )}
+
+            {/* ─── Guide Picker Panel (visible when CHOOSE_GUIDE is selected) ─── */}
+            {guidePreference === "CHOOSE_GUIDE" && (
+              <div className="mt-4 rounded-2xl border border-[#e5e7db] bg-gradient-to-br from-[#fafbf8] to-[#f5f7f0] p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-[#485C11]/10 flex items-center justify-center">
+                      <User className="w-4 h-4 text-[#485C11]" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-[#1a1a1a]">Choose Your Guide</h3>
+                      <p className="text-xs text-[#6b7280]">
+                        {guideSearchCity ? `Showing guides for ${guideSearchCity}` : "Add a destination to see available guides"}
+                      </p>
+                    </div>
+                  </div>
+                  {(selectedDestinations.length > 0 || citiesText.trim()) && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => fetchGuidesForDestinations(guideSearchCity)}
+                      className="text-xs"
+                    >
+                      <RotateCcw className="w-3 h-3 mr-1" />
+                      Refresh
+                    </Button>
+                  )}
+                </div>
+
+                {/* Destination area switcher if multiple stops exist */}
+                {selectedDestinations.length > 1 && (
+                  <div className="flex items-center gap-1.5 flex-wrap mb-4 pb-3 border-b border-[#e5e7db]/70">
+                    <span className="text-[11px] font-semibold text-[#6b7280]">Destination Area:</span>
+                    {selectedDestinations.map((dest) => {
+                      const isCurrent = guideSearchCity.toLowerCase() === dest.name.toLowerCase();
+                      return (
+                        <button
+                          key={dest.name}
+                          type="button"
+                          onClick={() => fetchGuidesForDestinations(dest.name)}
+                          className={`text-xs px-2.5 py-1 rounded-full font-medium transition-all ${
+                            isCurrent
+                              ? "bg-[#485C11] text-white shadow-xs"
+                              : "bg-white border border-[#e5e7db] text-[#4a5043] hover:border-[#8E9C78]"
+                          }`}
+                        >
+                          📍 {dest.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {loadingGuides ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="w-6 h-6 text-[#485C11] animate-spin" />
+                    <span className="ml-2 text-sm text-[#6b7280]">Searching for guides…</span>
+                  </div>
+                ) : availableGuides.length === 0 ? (
+                  <div className="text-center py-8">
+                    <User className="w-10 h-10 text-[#9ca3af] mx-auto mb-2" />
+                    <p className="text-sm text-[#6b7280]">
+                      {guideSearchCity
+                        ? `No verified guides found for ${guideSearchCity}. Try "Need a Guide" to auto-assign one.`
+                        : "Enter a destination above to browse available guides."}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3 max-h-[400px] overflow-y-auto pr-1">
+                    {availableGuides.map((guide) => {
+                      const isSelected = selectedGuide?.id === guide.id;
+                      return (
+                        <button
+                          key={guide.id}
+                          type="button"
+                          onClick={() => setSelectedGuide(isSelected ? null : guide)}
+                          className={`w-full text-left rounded-2xl border-2 p-4 transition-all duration-200 hover:shadow-md ${
+                            isSelected
+                              ? "border-[#485C11] bg-[#485C11]/5 shadow-md ring-2 ring-[#485C11]/20"
+                              : "border-[#e5e7db] bg-white hover:border-[#8E9C78]"
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            {/* Guide Photo */}
+                            <div className={`w-14 h-14 rounded-xl overflow-hidden shrink-0 border-2 ${
+                              isSelected ? "border-[#485C11]" : "border-[#e5e7db]"
+                            }`}>
+                              {guide.profilePhoto ? (
+                                <img
+                                  src={guide.profilePhoto}
+                                  alt={guide.name}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <div className="w-full h-full bg-[#DFECC6] flex items-center justify-center">
+                                  <User className="w-6 h-6 text-[#485C11]" />
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Guide Info */}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm font-bold text-[#1a1a1a] truncate">{guide.name}</p>
+                                {isSelected && (
+                                  <span className="shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#485C11] text-white">
+                                    <Check className="w-3 h-3" /> Selected
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-3 mt-1">
+                                <span className="inline-flex items-center gap-1 text-xs text-amber-600">
+                                  <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                                  {guide.rating.toFixed(1)}
+                                </span>
+                                <span className="inline-flex items-center gap-1 text-xs text-[#6b7280]">
+                                  <Award className="w-3 h-3" />
+                                  {guide.experienceYears}y exp
+                                </span>
+                                <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#485C11]">
+                                  <IndianRupee className="w-3 h-3" />
+                                  {guide.hourlyRate}/hr
+                                </span>
+                              </div>
+
+                              {/* Languages */}
+                              {guide.languages.length > 0 && (
+                                <div className="flex items-center gap-1 mt-1.5">
+                                  <Languages className="w-3 h-3 text-[#9ca3af] shrink-0" />
+                                  <div className="flex gap-1 flex-wrap">
+                                    {guide.languages.slice(0, 4).map((lang) => (
+                                      <span key={lang} className="text-[10px] px-1.5 py-0.5 rounded-full bg-[#f0f4e8] text-[#485C11] font-medium">
+                                        {lang}
+                                      </span>
+                                    ))}
+                                    {guide.languages.length > 4 && (
+                                      <span className="text-[10px] text-[#9ca3af]">+{guide.languages.length - 4}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Expertise */}
+                              {guide.expertise.length > 0 && (
+                                <div className="flex gap-1 flex-wrap mt-1.5">
+                                  {guide.expertise.slice(0, 3).map((exp) => (
+                                    <span key={exp} className="text-[10px] px-1.5 py-0.5 rounded-full bg-[#e8eaf0] text-[#4a5043] font-medium">
+                                      {exp}
+                                    </span>
+                                  ))}
+                                  {guide.expertise.length > 3 && (
+                                    <span className="text-[10px] text-[#9ca3af]">+{guide.expertise.length - 3}</span>
+                                  )}
+                                </div>
+                              )}
+
+                              {guide.bio && (
+                                <p className="text-xs text-[#6b7280] mt-1.5 line-clamp-2 italic">
+                                  &ldquo;{guide.bio}&rdquo;
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Selected guide confirmation */}
+                {selectedGuide && (
+                  <div className="mt-3 flex items-center gap-2 p-3 rounded-xl bg-[#DFECC6]/50 border border-[#8E9C78]/40">
+                    <CheckCircle className="w-4 h-4 text-[#485C11] shrink-0" />
+                    <p className="text-xs font-medium text-[#38480e]">
+                      <span className="font-bold">{selectedGuide.name}</span> will be assigned as your local guide
+                      {" · "}
+                      <span className="text-[#485C11]">₹{selectedGuide.hourlyRate}/hr</span>
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedGuide(null)}
+                      className="ml-auto text-[#6b7280] hover:text-red-500 transition-colors"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Travel Interests (Combined Multi-select Dropdown) */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Travel Interests
+                </label>
+                <span className="text-xs text-muted-foreground">
+                  Select multiple styles & activities
+                </span>
+              </div>
+              <MultiSelectInterests
+                selected={travelInterests}
+                onChange={setTravelInterests}
+                placeholder="Choose or search travel interests..."
+              />
+            </div>
+
+            {/* Special Requests */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Special Requests
+              </label>
+              <Textarea
+                value={specialRequests}
+                onChange={(e) => setSpecialRequests(e.target.value)}
+                placeholder="Any special requirements or preferences..."
+                rows={3}
+              />
+            </div>
+
+
+
+            {/* Terminal Output */}
+            {jobStatus !== 'idle' && (
+              <div className="p-4 bg-black text-green-400 font-mono text-sm rounded-md border border-gray-600">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+                  <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
+                  <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                  <span className="text-gray-400 ml-2">Terminal</span>
+                </div>
+                <div className="space-y-1">
+                  {jobStatus === 'queued' && (
+                    <>
+                      <div>$ 🚀 Starting travel plan generation...</div>
+                      <div>$ 📋 Job queued - waiting in line...</div>
+                    </>
+                  )}
+                  {jobStatus === 'processing' && (
+                    <>
+                      <div>$ 🚀 Starting travel plan generation...</div>
+                      <div>$ 📋 Job queued - waiting in line...</div>
+                      <div>$ ⚙️  Job processing - generating your travel plan...</div>
+                      <div>$ 🤖 Calling LLM API...</div>
+                    </>
+                  )}
+                  {jobStatus === 'completed' && (
+                    <>
+                      <div>$ 🚀 Starting travel plan generation...</div>
+                      <div>$ 📋 Job queued - waiting in line...</div>
+                      <div>$ ⚙️  Job processing - generating your travel plan...</div>
+                      <div>$ 🤖 Calling LLM API...</div>
+                      <div>$ ✅ LLM response received successfully!</div>
+                      <div>$ 🎉 Travel plan completed!</div>
+                    </>
+                  )}
+                  {jobStatus === 'failed' && (
+                    <>
+                      <div>$ 🚀 Starting travel plan generation...</div>
+                      <div>$ 📋 Job queued - waiting in line...</div>
+                      <div>$ ⚙️  Job processing - generating your travel plan...</div>
+                      <div>$ 🤖 Calling LLM API...</div>
+                      <div>$ ❌ Error generating travel plan: {error}</div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Generate Button */}
+            <Button
+              onClick={generatePlan}
+              disabled={loading}
+              className="w-full"
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Generating Plan...
+                </>
+              ) : (
+                <>
+                  <Globe className="mr-2 h-4 w-4" />
+                  Generate Travel Plan
+                </>
+              )}
+            </Button>
+
+            {/* Job Status Indicator */}
+            {jobStatus !== 'idle' && (
+              <div className="mt-3 flex items-center space-x-2">
+                <div className={`h-2 w-2 rounded-full ${jobStatus === 'queued' ? 'bg-yellow-500' :
+                  jobStatus === 'processing' ? 'bg-blue-500' :
+                    jobStatus === 'completed' ? 'bg-green-500' :
+                      jobStatus === 'failed' ? 'bg-red-500' : 'bg-gray-500'
+                  }`} />
+                <span className="text-sm text-gray-600">
+                  {jobStatus === 'queued' && 'Job queued, waiting to start...'}
+                  {jobStatus === 'processing' && 'Processing your travel plan...'}
+                  {jobStatus === 'completed' && 'Travel plan completed!'}
+                  {jobStatus === 'failed' && 'Job failed'}
+                </span>
+              </div>
+            )}
+
+            {/* Job Status with Progress */}
+            {jobStatus !== 'idle' && (
+              <div className={`p-4 rounded-md ${jobStatus === 'completed' ? 'bg-green-50 border border-green-200' :
+                jobStatus === 'failed' ? 'bg-red-50 border border-red-200' :
+                  jobStatus === 'queued' ? 'bg-blue-50 border border-blue-200' :
+                    'bg-yellow-50 border border-yellow-200'
+                }`}>
+                <div className="flex items-center gap-3 mb-3">
+                  {jobStatus === 'completed' ? (
+                    <CheckCircle className="h-5 w-5 text-green-500" />
+                  ) : jobStatus === 'failed' ? (
+                    <AlertCircle className="h-5 w-5 text-red-500" />
+                  ) : jobStatus === 'queued' ? (
+                    <Clock className="h-5 w-5 text-blue-500" />
+                  ) : (
+                    <Loader2 className="h-5 w-5 text-yellow-500 animate-spin" />
+                  )}
+                  <div className="flex-1">
+                    <p className={`font-medium ${jobStatus === 'completed' ? 'text-green-700' :
+                      jobStatus === 'failed' ? 'text-red-700' :
+                        jobStatus === 'queued' ? 'text-blue-700' :
+                          'text-yellow-700'
+                      }`}>
+                      {jobStatus === 'completed' ? 'Travel plan generated successfully!' :
+                        jobStatus === 'failed' ? 'Failed to generate travel plan' :
+                          jobStatus === 'queued' ? 'Job submitted to queue, processing...' :
+                            'Processing your request...'}
+                    </p>
+                    <p className={`text-xs ${jobStatus === 'completed' ? 'text-green-600' :
+                      jobStatus === 'failed' ? 'text-red-600' :
+                        jobStatus === 'queued' ? 'text-blue-600' :
+                          'text-yellow-600'
+                      }`}>
+                      {jobStatus === 'completed' ? 'Your itinerary is ready below' :
+                        jobStatus === 'failed' ? 'Please try again or check your inputs' :
+                          jobStatus === 'queued' ? 'Waiting in queue...' :
+                            'Generating your personalized travel plan...'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div className={`h-2 rounded-full transition-all duration-1000 ${jobStatus === 'completed' ? 'bg-green-500 w-full' :
+                    jobStatus === 'failed' ? 'bg-red-500 w-full' :
+                      jobStatus === 'queued' ? 'bg-blue-500 w-1/3' :
+                        'bg-yellow-500 w-2/3'
+                    }`}></div>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-md">
+                <AlertCircle className="h-4 w-4 text-red-500" />
+                <p className="text-red-700 text-sm">{error}</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Plan Output */}
+        {plan && (
+          <div className="space-y-6">
+            {/* Itinerary Decision Card (Accept / Reject) */}
+            {decisionStatus === 'pending' && (
+              <Card className="border-2 border-[#8E9C78]/40 bg-gradient-to-r from-[#DFECC6]/30 via-white to-[#DFECC6]/30 shadow-md">
+                <CardContent className="p-6">
+                  <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="size-5 text-[#485C11]" />
+                        <h3 className="text-lg font-bold text-[#1a1a1a]">
+                          Review Your Generated Itinerary
+                        </h3>
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        Would you like to accept this plan and add it directly to your schedule?
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-3 w-full md:w-auto">
+                      <Button
+                        onClick={handleAcceptPlan}
+                        className="flex-1 md:flex-none bg-[#485C11] hover:bg-[#3a4d0d] text-white rounded-full px-6 shadow-sm"
+                      >
+                        <Check className="mr-2 size-4" />
+                        Accept Itinerary
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleRejectPlan}
+                        className="flex-1 md:flex-none rounded-full px-6 border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
+                      >
+                        <X className="mr-2 size-4" />
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* If Accepted Banner */}
+            {decisionStatus === 'accepted' && (
+              <Card className="border-2 border-green-500/40 bg-green-50/50 shadow-md animate-in fade-in-0 duration-300">
+                <CardContent className="p-6">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="size-9 rounded-full bg-green-100 flex items-center justify-center shrink-0 mt-0.5">
+                        <CheckCircle className="size-5 text-green-700" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-bold text-green-900">
+                          Itinerary Accepted & Added to Schedule!
+                        </h3>
+                        <p className="text-xs sm:text-sm text-green-700 mt-0.5">
+                          This itinerary is now synced side-by-side with your calendar in the My Schedule menu.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2.5 w-full sm:w-auto">
+                      <Link href="/mapcalendar" className="w-full sm:w-auto">
+                        <Button className="w-full bg-[#485C11] hover:bg-[#3a4d0d] text-white rounded-full px-6 shadow-sm">
+                          <CalendarIcon className="mr-2 size-4" />
+                          View in My Schedule
+                          <ArrowRight className="ml-2 size-4" />
+                        </Button>
+                      </Link>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* If Rejected Banner */}
+            {decisionStatus === 'rejected' && (
+              <Card className="border-2 border-amber-400/50 bg-amber-50/60 shadow-md animate-in fade-in-0 duration-300">
+                <CardContent className="p-6">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="size-9 rounded-full bg-amber-100 flex items-center justify-center shrink-0 mt-0.5">
+                        <AlertCircle className="size-5 text-amber-700" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-bold text-amber-900">
+                          Itinerary Rejected
+                        </h3>
+                        <p className="text-xs sm:text-sm text-amber-800 mt-0.5">
+                          Would you like to regenerate a fresh plan with AI, or edit your travel preferences above?
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2.5 w-full sm:w-auto">
+                      <Button
+                        onClick={handleRegenerate}
+                        disabled={loading}
+                        className="flex-1 sm:flex-none bg-[#485C11] hover:bg-[#3a4d0d] text-white rounded-full px-5 text-xs sm:text-sm"
+                      >
+                        <RotateCcw className="mr-1.5 size-3.5" />
+                        Regenerate Plan
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleEditChanges}
+                        className="flex-1 sm:flex-none rounded-full px-5 border-amber-300 text-amber-900 hover:bg-amber-100/70 text-xs sm:text-sm"
+                      >
+                        <Edit3 className="mr-1.5 size-3.5" />
+                        Edit Preferences
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Summary */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <CheckCircle className="h-5 w-5 text-green-600" />
+                  Trip Summary
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-gray-700 mb-4">{summary}</p>
+                <div className="flex gap-2">
+                  <Badge variant="secondary">
+                    <IndianRupee className="h-3 w-3 mr-1" />
+                    {plan?.total_estimated_cost || "₹15,000"}
+                  </Badge>
+                  <Badge variant="outline">
+                    <Clock className="h-3 w-3 mr-1" />
+                    {plan?.itinerary?.length || 0} Days
+                  </Badge>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Itinerary */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Detailed Itinerary</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-6">
+                  {(plan?.itinerary || []).map((day, idx) => (
+                    <div key={idx} className="border-l-2 border-[#485C11]/30 pl-4 py-1">
+                      <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="font-semibold text-lg text-gray-900">{day.day}</h3>
+                          <Badge variant="outline" className="text-xs">
+                            <MapPin className="h-3 w-3 mr-1 text-[#485C11]" />
+                            {day.city}
+                          </Badge>
+                          {day.weather && (
+                            <Badge variant="secondary" className="text-xs bg-sky-50 text-sky-800 border-sky-200">
+                              <span className="mr-1">{day.weather.emoji}</span>
+                              {day.weather.description} · {day.weather.minC}–{day.weather.maxC}°C
+                            </Badge>
+                          )}
+                        </div>
+                        <Badge variant="secondary" className="text-xs font-semibold text-[#485C11] bg-[#DFECC6]/60">
+                          <IndianRupee className="h-3 w-3 mr-1" />
+                          {day.estimated_cost}
+                        </Badge>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
+                        <div className="p-2.5 rounded-xl bg-gray-50/70 border border-gray-100">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Morning</p>
+                          <p className="text-sm text-gray-700">{day.morning}</p>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-gray-50/70 border border-gray-100">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Afternoon</p>
+                          <p className="text-sm text-gray-700">{day.afternoon}</p>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-gray-50/70 border border-gray-100">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Evening</p>
+                          <p className="text-sm text-gray-700">{day.evening}</p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
+                        <div>
+                          <p className="text-xs font-medium text-gray-500 uppercase">Accommodation</p>
+                          <p className="text-sm text-gray-700">{day.accommodation}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-medium text-gray-500 uppercase">Dining & Food</p>
+                          <p className="text-sm text-gray-700">{day.meals}</p>
+                        </div>
+                      </div>
+
+                      {/* Dedicated Local Guide Card */}
+                      {day.guide ? (
+                        <div className="mt-3 p-3 rounded-xl bg-[#DFECC6]/40 border border-[#8E9C78]/30 flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-8 h-8 rounded-lg bg-[#485C11]/15 flex items-center justify-center text-[#485C11] shrink-0">
+                              <User className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold text-[#1a1a1a]">
+                                Local Guide: {day.guide.name}
+                                {day.guide.isDemo && (
+                                  <span className="ml-1 text-[10px] text-amber-600 font-normal">(Demo Guide)</span>
+                                )}
+                              </p>
+                              <p className="text-[11px] text-[#6b7280]">
+                                Dedicated local expertise · ₹{day.guide.hourlyRate}/hr (est. ₹{day.guide.cost})
+                              </p>
+                            </div>
+                          </div>
+                          <Badge variant="secondary" className="text-[10px] bg-[#485C11] text-white">
+                            Verified Guide
+                          </Badge>
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-xs text-[#9ca3af] italic">
+                          Self-guided exploration
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Additional Info */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Travel Tips */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Travel Tips</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2">
+                    {(plan?.travel_tips || []).map((tip, idx) => (
+                      <li key={idx} className="flex items-start gap-2 text-sm">
+                        <span className="text-blue-600 mt-1">•</span>
+                        <span className="text-gray-700">{tip}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+
+              {/* Packing List */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Packing List</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2">
+                    {(plan?.packing_list || []).map((item, idx) => (
+                      <li key={idx} className="flex items-start gap-2 text-sm">
+                        <span className="text-blue-600 mt-1">•</span>
+                        <span className="text-gray-700">{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Emergency Contacts */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-red-700">Emergency Contacts</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 uppercase">Local Emergency</p>
+                    <p className="text-sm font-mono text-gray-700">{plan?.emergency_contacts?.local_emergency || "112 / 100"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 uppercase">Embassy</p>
+                    <p className="text-sm font-mono text-gray-700">{plan?.emergency_contacts?.embassy || "National Helpline 1363"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 uppercase">Hotel</p>
+                    <p className="text-sm font-mono text-gray-700">{plan?.emergency_contacts?.hotel || "Hotel Concierge Desk"}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Grounding Diagnostic Panel (collapsible) */}
+            {agentResult && (
+              <Card className="border-dashed">
+                <CardHeader
+                  className="cursor-pointer select-none"
+                  onClick={() => setShowDiagnostics((prev) => !prev)}
+                >
+                  <CardTitle className="flex items-center justify-between text-sm text-gray-600">
+                    <span className="flex items-center gap-2">
+                      {agentResult.routerTrace.validationStatus === "PASSED" ? (
+                        <ShieldCheck className="h-4 w-4 text-green-600" />
+                      ) : (
+                        <ShieldAlert className="h-4 w-4 text-amber-600" />
+                      )}
+                      Grounding Diagnostics
+                      <Badge variant={agentResult.routerTrace.validationStatus === "PASSED" ? "secondary" : "outline"}>
+                        {agentResult.routerTrace.validationStatus}
+                      </Badge>
+                      {agentResult.routerTrace.fallbackUsed && (
+                        <Badge variant="outline" className="text-amber-700">Fallback used</Badge>
+                      )}
+                    </span>
+                    {showDiagnostics ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                  </CardTitle>
+                </CardHeader>
+                {showDiagnostics && (
+                  <CardContent className="space-y-4 text-sm">
+                    <div>
+                      <p className="text-xs font-medium text-gray-500 uppercase mb-2">Agents Executed</p>
+                      <div className="flex flex-wrap gap-2">
+                        {agentResult.routerTrace.agentsExecuted.map((agent, idx) => (
+                          <Badge key={`${agent}-${idx}`} variant="secondary" className="text-xs">
+                            <Check className="h-3 w-3 mr-1 text-green-600" />
+                            {agent}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-xs font-medium text-gray-500 uppercase mb-2">Grounding Sources</p>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        {Object.entries(agentResult.sources).map(([key, value]) => (
+                          <div key={key} className="flex justify-between border rounded px-2 py-1">
+                            <span className="text-gray-500">{key}</span>
+                            <span className="font-mono text-gray-800">{value || "—"}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {agentResult.days.some((d) => d.guide?.isDemo) && (
+                      <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 text-xs">
+                        ⚠️ DEMO DATA — NOT BOOKABLE: one or more days use a demo guide fallback because the Roamly guide database was unreachable.
+                      </div>
+                    )}
+
+                    {agentResult.warnings && agentResult.warnings.length > 0 && (
+                      <div>
+                        <p className="text-xs font-medium text-gray-500 uppercase mb-2">Warnings</p>
+                        <ul className="space-y-1 text-xs text-gray-600">
+                          {agentResult.warnings.map((w, idx) => (
+                            <li key={idx}>• [{w.code}] {w.details}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <p className="text-xs text-gray-400">
+                      Re-optimizations: {agentResult.routerTrace.reOptimizations} · Trip ID: {agentResult.tripId ?? "not persisted"}
+                    </p>
+                  </CardContent>
+                )}
+              </Card>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
